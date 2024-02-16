@@ -2,16 +2,14 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.security.InvalidKeyException;
-import java.security.NoSuchAlgorithmException;
-import java.security.NoSuchProviderException;
-import java.security.SignatureException;
-import java.security.Signature;
+import java.security.*;
 import java.security.cert.*;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+
+
 
 public class ValidateCert {
     public static void main(String[] args) {
@@ -181,4 +179,7 @@ public class ValidateCert {
             System.err.println("Failed to get the certificate encoding: " + e.getMessage());
         }
     }
+
+
+
 }

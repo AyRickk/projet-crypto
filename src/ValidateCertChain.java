@@ -2,11 +2,15 @@ import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.*;
 import java.security.cert.*;
+import java.security.interfaces.RSAPublicKey;
 import java.util.*;
+import java.security.cert.X509Certificate;
+
 
 public class ValidateCertChain {
     public static void main(String[] args) {
@@ -71,9 +75,9 @@ public class ValidateCertChain {
 
     private static void validateCertificateChain(List<X509Certificate> certs) throws Exception {
         // Vérifier le certificat racine (auto-signé)
-        System.out.println("Root certificate:");
+        System.out.println("############### ROOT CERTIFICATE ###############\n");
         X509Certificate rootCert = certs.get(0);
-        checkSignatureAndAlgorithm(rootCert);
+        checkSignatureAndAlgorithm(rootCert, rootCert);
         if (!rootCert.getIssuerX500Principal().equals(rootCert.getSubjectX500Principal())) {
             throw new IllegalArgumentException("Root certificate is not self-signed");
         }
@@ -85,7 +89,7 @@ public class ValidateCertChain {
                 checkValidityPeriod(issuerCert);
                 checkAndDisplayKeyUsage(issuerCert);
             }
-            System.out.println("Certificate " + (i+1) + ":");
+            System.out.println("\n\n############### CERTIFICATE " + (i+1) + " ###############\n");
             // Vérifier que l'émetteur du certificat correspond au sujet du certificat précédent
             if (!cert.getIssuerX500Principal().equals(issuerCert.getSubjectX500Principal())) {
                 System.out.println("Issuer of cert " + (i) + " does not match subject of cert " + (i+1));
@@ -95,12 +99,9 @@ public class ValidateCertChain {
             }
 
             // Vérifier la signature du certificat avec la clé publique de l'émetteur
-            try {
-                cert.verify(issuerCert.getPublicKey());
-                System.out.println("Cert " + (i) + " signature verified against issuer cert " + (i+1));
-            } catch (SignatureException e) {
-                System.out.println("Cert " + (i) + " signature verification FAILED against issuer cert " + (i+1));
-            }
+            checkSignatureAndAlgorithm(cert, issuerCert);
+            System.out.println("Cert " + (i) + " signature verified against issuer cert " + (i+1));
+
 
             checkValidityPeriod(cert);
             checkAndDisplayKeyUsage(cert);
@@ -147,11 +148,20 @@ public class ValidateCertChain {
         }
     }
 
-    private static void checkSignatureAndAlgorithm(X509Certificate cert) {
+    private static void checkSignatureAndAlgorithm(X509Certificate cert, X509Certificate issuerCert) {
         try {
             String sigAlg = cert.getSigAlgName();
+            if (sigAlg.contains("RSA")){
+                if(verifyRSASignature(cert, issuerCert)){
+                    System.out.println("RSA Signature verifies: SUCCESS");
+                }else{
+                    System.out.println("RSA Signature verifies: FAILED");
+                }
+
+            }
+
             Signature sig = Signature.getInstance(sigAlg);
-            sig.initVerify(cert.getPublicKey());
+            sig.initVerify(issuerCert.getPublicKey());
             sig.update(cert.getTBSCertificate());
             boolean verifies = sig.verify(cert.getSignature());
             System.out.println("Signature algorithm: " + sigAlg);
@@ -198,6 +208,62 @@ public class ValidateCertChain {
         } catch (CertificateException e) {
             System.err.println("Error generating certificate: " + e.getMessage());
             return null;
+        }
+    }
+
+    public static boolean verifyRSASignature(X509Certificate cert, X509Certificate issuerCert) {
+        try {
+            PublicKey publicKey = issuerCert.getPublicKey();
+            if (publicKey instanceof RSAPublicKey rsaPublicKey) {
+
+                BigInteger modulus = rsaPublicKey.getModulus();
+                BigInteger exponent = rsaPublicKey.getPublicExponent();
+
+                byte[] signatureBytes = cert.getSignature();
+                BigInteger signature = new BigInteger(1, signatureBytes);
+
+                // Déchiffrement de la signature pour obtenir le hash
+                BigInteger signatureCheck = signature.modPow(exponent, modulus);
+
+                // Calcul du hash du TBSCertificate
+                MessageDigest crypt = MessageDigest.getInstance("SHA-256");
+                crypt.update(cert.getTBSCertificate());
+                byte[] certHash = crypt.digest();
+
+                byte[] signatureCheckBytes = signatureCheck.toByteArray();
+                String sigAlg = cert.getSigAlgName();
+                int hashLength = 0;
+
+                // Determine the SHA type and set the hash length accordingly
+                if (sigAlg.contains("SHA1")) {
+                    hashLength = 20; // SHA-1 produces a 160-bit (20-byte) hash value
+                } else if (sigAlg.contains("SHA256")) {
+                    hashLength = 32; // SHA-256 produces a 256-bit (32-byte) hash value
+                } else if (sigAlg.contains("SHA384")) {
+                    hashLength = 48; // SHA-384 produces a 384-bit (48-byte) hash value
+                } else if (sigAlg.contains("SHA512")) {
+                    hashLength = 64; // SHA-512 produces a 512-bit (64-byte) hash value
+                }
+
+                // Take the last 'hashLength' bytes
+                signatureCheckBytes = Arrays.copyOfRange(signatureCheckBytes, signatureCheckBytes.length - hashLength, signatureCheckBytes.length);
+
+
+                return java.util.Arrays.equals(certHash, signatureCheckBytes);
+            }
+        } catch (CertificateEncodingException | NoSuchAlgorithmException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    public static void verifyBasicConstraints(X509Certificate cert) {
+        // Get the Basic Constraints extension
+        int basicConstraints = cert.getBasicConstraints();
+        if (basicConstraints != -1) {
+            System.out.println("Basic Constraints: " + basicConstraints);
+        } else {
+            System.out.println("No Basic Constraints available.");
         }
     }
 }
