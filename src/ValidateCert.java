@@ -46,8 +46,6 @@ public class ValidateCert {
 
     public static X509Certificate loadCertificate(Path path, String format) {
     try {
-        byte[] certBytes = Files.readAllBytes(path);
-
         CertificateFactory certFactory = CertificateFactory.getInstance("X.509");
 
         if (format.equalsIgnoreCase("DER")) {
