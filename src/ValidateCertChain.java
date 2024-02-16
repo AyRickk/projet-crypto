@@ -3,6 +3,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.*;
@@ -10,26 +11,33 @@ import java.security.cert.*;
 import java.security.interfaces.RSAPublicKey;
 import java.util.*;
 import java.security.cert.X509Certificate;
+import org.bouncycastle.asn1.ASN1InputStream;
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.x509.CRLDistPoint;
+import org.bouncycastle.asn1.x509.DistributionPoint;
+import org.bouncycastle.asn1.x509.DistributionPointName;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
 
 
 public class ValidateCertChain {
     public static void main(String[] args) {
-        // Assurez-vous qu'au moins deux certificats sont fournis
-        Optional<String[]> parsedArgsOpt = parseArguments(args);
-        if (parsedArgsOpt.isEmpty()) {
-            System.err.println("Invalid arguments.");
-            return;
-        }
-        String[] parsedArgs = parsedArgsOpt.get();
-        String format = parsedArgs[0];
         try {
-            // Charger tous les certificats
+            // Assurez-vous qu'au moins deux certificats sont fournis
+            Optional<String[]> parsedArgsOpt = parseArguments(args);
+            if (parsedArgsOpt.isEmpty()) {
+                throw new IllegalArgumentException("Invalid arguments.");
+            }
+            String[] parsedArgs = parsedArgsOpt.get();
+            String format = parsedArgs[0];
+
             List<X509Certificate> certs = new ArrayList<>();
             for (int i = 1; i < parsedArgs.length; i++) {
-                X509Certificate cert = loadCertificate(Path.of(parsedArgs[i]), format);
-                certs.add(cert);
+                certs.add(loadCertificate(Path.of(parsedArgs[i]), format));
             }
-            // Valider la chaîne
+
+            // Charger tous les certificats et valider la chaîne
             validateCertificateChain(certs);
 
         } catch (Exception e) {
@@ -74,39 +82,39 @@ public class ValidateCertChain {
     }
 
     private static void validateCertificateChain(List<X509Certificate> certs) throws Exception {
-        // Vérifier le certificat racine (auto-signé)
-        System.out.println("############### ROOT CERTIFICATE ###############\n");
-        X509Certificate rootCert = certs.get(0);
-        checkSignatureAndAlgorithm(rootCert, rootCert);
-        if (!rootCert.getIssuerX500Principal().equals(rootCert.getSubjectX500Principal())) {
-            throw new IllegalArgumentException("Root certificate is not self-signed");
-        }
-        System.out.println("Root certificate is autosigned ");
-        for (int i = 1; i < certs.size() ; i++) {
+        for (int i = 0; i < certs.size(); i++) {
+            System.out.println("\n\n########## Certificate " + (i + 1) + " ##########\n");
             X509Certificate cert = certs.get(i);
-            X509Certificate issuerCert = certs.get(i - 1);
-            if(i==1){
-                checkValidityPeriod(issuerCert);
-                checkAndDisplayKeyUsage(issuerCert);
+            X509Certificate issuerCert = (i == 0) ? cert : certs.get(i - 1);
+
+            // Vérifier le certificat racine (auto-signé)
+            if (i == 0 && !cert.getIssuerX500Principal().equals(cert.getSubjectX500Principal())) {
+                throw new IllegalArgumentException("Root certificate is not self-signed");
             }
-            System.out.println("\n\n############### CERTIFICATE " + (i+1) + " ###############\n");
+
             // Vérifier que l'émetteur du certificat correspond au sujet du certificat précédent
-            if (!cert.getIssuerX500Principal().equals(issuerCert.getSubjectX500Principal())) {
-                System.out.println("Issuer of cert " + (i) + " does not match subject of cert " + (i+1));
+            if (i != 0 && !cert.getIssuerX500Principal().equals(issuerCert.getSubjectX500Principal())) {
                 continue;
-            }else {
-                System.out.println("Issuer of cert " + (i) + " matches subject of cert " + (i+1));
             }
 
             // Vérifier la signature du certificat avec la clé publique de l'émetteur
             checkSignatureAndAlgorithm(cert, issuerCert);
-            System.out.println("Cert " + (i) + " signature verified against issuer cert " + (i+1));
 
-
+            // Vérifier la période de validité et l'utilisation de la clé
             checkValidityPeriod(cert);
             checkAndDisplayKeyUsage(cert);
-        }
+            verifyBasicConstraints(cert);
 
+//            String url = getCRLDistributionURL(cert);
+//            if (url != null) {
+//                System.out.println("CRL Distribution Points: " + url);
+//            }
+//            if (isCertificateRevoked(cert, url)) {
+//                System.out.println("Certificate is revoked.");
+//            } else {
+//                System.out.println("Certificate is not revoked.");
+//            }
+        }
     }
 
 
@@ -260,10 +268,27 @@ public class ValidateCertChain {
     public static void verifyBasicConstraints(X509Certificate cert) {
         // Get the Basic Constraints extension
         int basicConstraints = cert.getBasicConstraints();
-        if (basicConstraints != -1) {
-            System.out.println("Basic Constraints: " + basicConstraints);
+        if (basicConstraints != -1){
+            System.out.println("This certificate is a CA with basic constraints of : " + basicConstraints);
         } else {
-            System.out.println("No Basic Constraints available.");
+            System.out.println("This certificate is not a CA.");
         }
+
     }
+
+//    public static boolean isCertificateRevoked(X509Certificate cert, String crlURL) {
+//        try {
+//            URL url = new URL(crlURL);
+//            InputStream crlStream = url.openStream();
+//            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+//            X509CRL crl = (X509CRL) cf.generateCRL(crlStream);
+//            crlStream.close();
+//
+//            return crl.isRevoked(cert);
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//            return true; // En cas d'erreur, considérer comme révoqué pour la sécurité
+//        }
+//    }
+    
 }
