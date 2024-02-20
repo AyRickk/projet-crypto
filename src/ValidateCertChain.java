@@ -1,8 +1,6 @@
-import java.io.BufferedReader;
-import java.io.ByteArrayInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
 import java.math.BigInteger;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -13,14 +11,12 @@ import java.util.*;
 import java.security.cert.X509Certificate;
 
 import org.bouncycastle.asn1.*;
-import org.bouncycastle.asn1.x509.CRLDistPoint;
-import org.bouncycastle.asn1.x509.DistributionPoint;
-import org.bouncycastle.asn1.x509.DistributionPointName;
-import org.bouncycastle.asn1.x509.GeneralName;
-import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.asn1.x509.*;
 
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.math.ec.ECCurve;
 import org.bouncycastle.math.ec.ECPoint;
@@ -33,11 +29,17 @@ import java.security.interfaces.ECPublicKey;
 
 import static org.bouncycastle.asn1.x509.Extension.cRLDistributionPoints;
 
+import org.bouncycastle.cert.ocsp.*;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder;
+import org.bouncycastle.operator.DigestCalculator;
+import org.bouncycastle.operator.DigestCalculatorProvider;
+import org.bouncycastle.operator.OperatorCreationException;
+import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
+
 
 public class ValidateCertChain {
     public static void main(String[] args) {
         try {
-            // Assurez-vous qu'au moins deux certificats sont fournis
             Optional<String[]> parsedArgsOpt = parseArguments(args);
             if (parsedArgsOpt.isEmpty()) {
                 throw new IllegalArgumentException("Invalid arguments.");
@@ -74,7 +76,6 @@ public class ValidateCertChain {
                     }
                     break;
                 default:
-                    // Collect all certificate paths
                     certPaths.add(args[i]);
                     break;
             }
@@ -84,7 +85,6 @@ public class ValidateCertChain {
             throw new IllegalArgumentException("At least one certificate file path is required. Usage: validate-cert [-format DER|PEM] <myCertFile>...");
         }
 
-        // Convert list to array and prepend the format
         String[] result = new String[certPaths.size() + 1];
         result[0] = format;
         for (int i = 0; i < certPaths.size(); i++) {
@@ -130,6 +130,15 @@ public class ValidateCertChain {
             }
 
             verifyCRL(cert, crlUrls);
+
+            if (i > 0) { // Pas besoin de vérifier le certificat racine avec OCSP
+                try {
+                    verifyOCSP(cert, issuerCert);
+                } catch (Exception e) {
+                    System.err.println("OCSP verification failed: " + e.getMessage());
+                }
+            }
+
         }
     }
 
@@ -334,7 +343,7 @@ public class ValidateCertChain {
                 BigInteger.valueOf(spec.getCofactor()));
         ECPublicKeyParameters publicKeyParameters = new ECPublicKeyParameters(point, domainParameters);
 
-        // Utiliser SHA-256 (ou l'algorithme approprié) pour hasher les données avant vérification
+        // Utiliser l'algorithme approprié pour hasher les données avant vérification
         // Calcul du hash du TBSCertificate
         MessageDigest crypt = null;
         if(cert.getSigAlgName().contains("SHA384")) {
@@ -363,6 +372,7 @@ public class ValidateCertChain {
     private static List<String> getCrlDistributionPoints(X509Certificate cert) throws CertificateParsingException {
         try {
             byte[] crlDPExtensionValue = cert.getExtensionValue(cRLDistributionPoints.getId());
+            System.out.println("CRL Distribution Points extension: " + crlDPExtensionValue);
             if (crlDPExtensionValue == null) {
                 return Collections.emptyList();
             }
@@ -401,9 +411,9 @@ public class ValidateCertChain {
                 CertificateFactory cf = CertificateFactory.getInstance("X.509");
                 X509CRL crl = (X509CRL) cf.generateCRL(crlStream);
                 if (crl.isRevoked(cert)) {
-                    System.out.println("Certificate is revoked by CRL: " + url);
+                    System.out.println("CRL : Certificate is revoked by CRL: " + url);
                 } else {
-                    System.out.println("Certificate is not revoked by CRL: " + url);
+                    System.out.println("CRL : Certificate is not revoked by CRL: " + url);
                 }
             } catch (Exception e) {
                 System.err.println("Error verifying CRL: " + e.getMessage());
@@ -412,5 +422,105 @@ public class ValidateCertChain {
     }
 
 
+    private static void verifyOCSP(X509Certificate cert, X509Certificate issuerCert) throws Exception {
+        try {
+            String ocspUrl = extractOcspUrl(cert);
+            if (ocspUrl == null) {
+                System.out.println("OCSP URL not found in certificate. Skipping OCSP verification.");
+                return;
+            }
 
+            // Préparation de la requête OCSP
+            OCSPReqBuilder builder = new OCSPReqBuilder();
+            try {
+                CertificateID id = generateCertificateID(cert, issuerCert);
+                builder.addRequest(id);
+
+                OCSPReq req = builder.build();
+
+                // Envoi de la requête OCSP
+                URL url = new URL(ocspUrl);
+                HttpURLConnection con = (HttpURLConnection) url.openConnection();
+                con.setRequestProperty("Content-Type", "application/ocsp-request");
+                con.setRequestProperty("Accept", "application/ocsp-response");
+                con.setDoOutput(true);
+                OutputStream out = con.getOutputStream();
+                out.write(req.getEncoded());
+                out.flush();
+
+
+                // Réception et analyse de la réponse OCSP
+                if (con.getResponseCode() == HttpURLConnection.HTTP_OK) {
+                    OCSPResp response = new OCSPResp(con.getInputStream());
+                    BasicOCSPResp basicResponse = (BasicOCSPResp) response.getResponseObject();
+                    if(basicResponse == null){
+                        return;
+                    }
+                    SingleResp[] responses = basicResponse.getResponses();
+                    for (SingleResp resp : responses) {
+                        Object status = resp.getCertStatus();
+                        if (status == CertificateStatus.GOOD) {
+                            System.out.println("OCSP : Certificate is not revoked");
+                        } else if (status instanceof RevokedStatus) {
+                            System.out.println("OCSP : Certificate is revoked");
+                        } else if (status instanceof UnknownStatus) {
+                            System.out.println("OCSP : Certificate status is unknown");
+                        }
+                    }
+                } else {
+                    throw new Exception("Received HTTP error code from OCSP server: " + con.getResponseCode());
+                }
+            } catch (OperatorCreationException e) {
+                System.err.println("Error creating DigestCalculator: " + e.getMessage());
+            } catch (Exception e) {
+                System.err.println("Error verifying OCSP: " + e.getMessage());
+                throw e;
+            }
+        } catch (Exception e) {
+            System.err.println("Error verifying OCSP : " + e.getMessage());
+            throw e;
+        }
+    }
+
+
+    private static String extractOcspUrl(X509Certificate cert) throws Exception {
+        byte[] aiaBytes = cert.getExtensionValue(Extension.authorityInfoAccess.getId());
+        if (aiaBytes == null) {
+            return null;
+        }
+
+        ASN1InputStream aiaAIS = new ASN1InputStream(aiaBytes);
+        ASN1OctetString aiaOctetString = (ASN1OctetString) aiaAIS.readObject();
+        aiaAIS.close();
+
+        aiaAIS = new ASN1InputStream(aiaOctetString.getOctets());
+        ASN1Sequence aiaSequence = (ASN1Sequence) aiaAIS.readObject();
+        aiaAIS.close();
+
+        AuthorityInformationAccess authorityInformationAccess = AuthorityInformationAccess.getInstance(aiaSequence);
+        for (AccessDescription accessDescription : authorityInformationAccess.getAccessDescriptions()) {
+            if (accessDescription.getAccessMethod().equals(AccessDescription.id_ad_ocsp)) {
+                GeneralName gn = accessDescription.getAccessLocation();
+                if (gn.getTagNo() == GeneralName.uniformResourceIdentifier) {
+                    return gn.getName().toString();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static CertificateID generateCertificateID(X509Certificate cert, X509Certificate issuerCert) throws OperatorCreationException, IOException, CertificateEncodingException, OCSPException {
+        DigestCalculatorProvider digCalcProv = new JcaDigestCalculatorProviderBuilder().build();
+        DigestCalculator digestCalculator = digCalcProv.get(CertificateID.HASH_SHA1);
+
+        X509CertificateHolder issuerCertHolder = new JcaX509CertificateHolder(issuerCert);
+
+        // Utilisation du numéro de série du certificat
+        BigInteger serialNumber = cert.getSerialNumber();
+
+        // Création de l'ID du certificat
+        CertificateID id = new CertificateID(digestCalculator, issuerCertHolder, serialNumber);
+
+        return id;
+    }
 }
