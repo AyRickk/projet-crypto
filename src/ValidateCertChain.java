@@ -11,14 +11,27 @@ import java.security.cert.*;
 import java.security.interfaces.RSAPublicKey;
 import java.util.*;
 import java.security.cert.X509Certificate;
-import org.bouncycastle.asn1.ASN1InputStream;
-import org.bouncycastle.asn1.ASN1Primitive;
-import org.bouncycastle.asn1.ASN1Sequence;
+
+import org.bouncycastle.asn1.*;
 import org.bouncycastle.asn1.x509.CRLDistPoint;
 import org.bouncycastle.asn1.x509.DistributionPoint;
 import org.bouncycastle.asn1.x509.DistributionPointName;
 import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralNames;
+
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.math.ec.ECCurve;
+import org.bouncycastle.math.ec.ECPoint;
+import org.bouncycastle.crypto.signers.ECDSASigner;
+import org.bouncycastle.crypto.params.ECPublicKeyParameters;
+import org.bouncycastle.crypto.params.ECDomainParameters;
+
+import java.security.spec.ECParameterSpec;
+import java.security.interfaces.ECPublicKey;
+
+import static org.bouncycastle.asn1.x509.Extension.cRLDistributionPoints;
 
 
 public class ValidateCertChain {
@@ -105,15 +118,18 @@ public class ValidateCertChain {
             checkAndDisplayKeyUsage(cert);
             verifyBasicConstraints(cert);
 
-//            String url = getCRLDistributionURL(cert);
-//            if (url != null) {
-//                System.out.println("CRL Distribution Points: " + url);
-//            }
-//            if (isCertificateRevoked(cert, url)) {
-//                System.out.println("Certificate is revoked.");
-//            } else {
-//                System.out.println("Certificate is not revoked.");
-//            }
+            // Vérifier les points de distribution de la liste de révocation (CRL)
+            List<String> crlUrls = getCrlDistributionPoints(cert);
+            if (!crlUrls.isEmpty()) {
+                System.out.println("CRL Distribution Points:");
+                for (String url : crlUrls) {
+                    System.out.println("- " + url);
+                }
+            } else {
+                System.out.println("No CRL Distribution Points available.");
+            }
+
+            verifyCRL(cert, crlUrls);
         }
     }
 
@@ -167,6 +183,14 @@ public class ValidateCertChain {
                 }
 
             }
+            if (sigAlg.contains("ECDSA")){
+                if(verifyECDSASignature(cert, issuerCert))
+                {
+                    System.out.println("ECDSA Signature verifies: SUCCESS");
+                } else{
+                    System.out.println("ECDSA Signature verifies: FAILED");
+                }
+            }
 
             Signature sig = Signature.getInstance(sigAlg);
             sig.initVerify(issuerCert.getPublicKey());
@@ -182,6 +206,8 @@ public class ValidateCertChain {
             System.err.println("Failed to verify the certificate signature: " + e.getMessage());
         } catch (CertificateEncodingException e) {
             System.err.println("Failed to get the certificate encoding: " + e.getMessage());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -239,6 +265,7 @@ public class ValidateCertChain {
                 byte[] certHash = crypt.digest();
 
                 byte[] signatureCheckBytes = signatureCheck.toByteArray();
+
                 String sigAlg = cert.getSigAlgName();
                 int hashLength = 0;
 
@@ -276,19 +303,114 @@ public class ValidateCertChain {
 
     }
 
-//    public static boolean isCertificateRevoked(X509Certificate cert, String crlURL) {
-//        try {
-//            URL url = new URL(crlURL);
-//            InputStream crlStream = url.openStream();
-//            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-//            X509CRL crl = (X509CRL) cf.generateCRL(crlStream);
-//            crlStream.close();
-//
-//            return crl.isRevoked(cert);
-//        } catch (Exception e) {
-//            e.printStackTrace();
-//            return true; // En cas d'erreur, considérer comme révoqué pour la sécurité
-//        }
-//    }
-    
+    private static boolean verifyECDSASignature(X509Certificate cert, X509Certificate issuerCert) throws Exception {
+        Security.addProvider(new BouncyCastleProvider());
+
+        // Extrait les composants r et s de la signature ECDSA
+        byte[] signature = cert.getSignature();
+        BigInteger[] rs = decodeECDSASignature(signature);
+
+        PublicKey publicKey = issuerCert.getPublicKey();
+        if (!(publicKey instanceof ECPublicKey)) {
+            throw new IllegalArgumentException("Public key must be instance of ECPublicKey for ECDSA verification.");
+        }
+
+        ECPublicKey ecPublicKey = (ECPublicKey) publicKey;
+        ECParameterSpec spec = ecPublicKey.getParams();
+        System.out.println("Curve: " + spec);
+        // Utilisez les informations de la clé publique et de la spécification de courbe directement
+        ECCurve curve = null;
+        if(cert.getSigAlgName().contains("SHA384")) {
+            curve = new org.bouncycastle.math.ec.custom.sec.SecP384R1Curve(); // Adaptez à la courbe utilisée si nécessaire
+        } else if (cert.getSigAlgName().contains("SHA256")) {
+            curve = new org.bouncycastle.math.ec.custom.sec.SecP256R1Curve(); // Adaptez à la courbe utilisée si nécessaire
+        }
+        assert curve != null;
+        ECPoint point = curve.createPoint(ecPublicKey.getW().getAffineX(), ecPublicKey.getW().getAffineY(), false);
+        ECDomainParameters domainParameters = new ECDomainParameters(
+                curve,
+                curve.createPoint(spec.getGenerator().getAffineX(), spec.getGenerator().getAffineY()),
+                spec.getOrder(),
+                BigInteger.valueOf(spec.getCofactor()));
+        ECPublicKeyParameters publicKeyParameters = new ECPublicKeyParameters(point, domainParameters);
+
+        // Utiliser SHA-256 (ou l'algorithme approprié) pour hasher les données avant vérification
+        // Calcul du hash du TBSCertificate
+        MessageDigest crypt = null;
+        if(cert.getSigAlgName().contains("SHA384")) {
+            crypt = MessageDigest.getInstance("SHA-384");
+        } else if (cert.getSigAlgName().contains("SHA256")) {
+            crypt = MessageDigest.getInstance("SHA-256");
+        }
+        assert crypt != null;
+        crypt.update(cert.getTBSCertificate());
+        byte[] certHash = crypt.digest();
+
+        // Initialise le vérificateur ECDSA avec la clé publique
+        ECDSASigner signer = new ECDSASigner();
+        signer.init(false, publicKeyParameters);
+        return signer.verifySignature(certHash, rs[0], rs[1]);
+    }
+
+    // Méthode pour décoder une signature ECDSA de ASN.1 DER format à BigInteger r et s
+    private static BigInteger[] decodeECDSASignature(byte[] signature) throws IOException {
+        ASN1Sequence sequence = (ASN1Sequence) ASN1Sequence.fromByteArray(signature);
+        BigInteger r = ((ASN1Integer) sequence.getObjectAt(0)).getValue();
+        BigInteger s = ((ASN1Integer) sequence.getObjectAt(1)).getValue();
+        return new BigInteger[] {r, s};
+    }
+
+    private static List<String> getCrlDistributionPoints(X509Certificate cert) throws CertificateParsingException {
+        try {
+            byte[] crlDPExtensionValue = cert.getExtensionValue(cRLDistributionPoints.getId());
+            if (crlDPExtensionValue == null) {
+                return Collections.emptyList();
+            }
+            ASN1InputStream oAsnInStream = new ASN1InputStream(new ByteArrayInputStream(crlDPExtensionValue));
+            ASN1Primitive derObjCrlDP = oAsnInStream.readObject();
+            DEROctetString dosCrlDP = (DEROctetString) derObjCrlDP;
+            byte[] crlDPsExtOctets = dosCrlDP.getOctets();
+            ASN1InputStream oAsnInStream2 = new ASN1InputStream(new ByteArrayInputStream(crlDPsExtOctets));
+            ASN1Primitive derObj2 = oAsnInStream2.readObject();
+            CRLDistPoint distPoint = CRLDistPoint.getInstance(derObj2);
+
+            List<String> crlUrls = new ArrayList<>();
+            for (DistributionPoint dp : distPoint.getDistributionPoints()) {
+                DistributionPointName dpn = dp.getDistributionPoint();
+                if (dpn != null && dpn.getType() == DistributionPointName.FULL_NAME) {
+                    GeneralName[] genNames = GeneralNames.getInstance(dpn.getName()).getNames();
+                    for (GeneralName genName : genNames) {
+                        if (genName.getTagNo() == GeneralName.uniformResourceIdentifier) {
+                            String url = ((DERIA5String) genName.getName()).getString();
+                            crlUrls.add(url);
+                        }
+                    }
+                }
+            }
+            return crlUrls;
+        } catch (IOException e) {
+            throw new CertificateParsingException(e.getMessage(), e);
+        }
+    }
+
+    private static void verifyCRL(X509Certificate cert, List<String> crlUrls) {
+        for (String url : crlUrls) {
+            try {
+                URL crlUrl = new URL(url);
+                InputStream crlStream = crlUrl.openStream();
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                X509CRL crl = (X509CRL) cf.generateCRL(crlStream);
+                if (crl.isRevoked(cert)) {
+                    System.out.println("Certificate is revoked by CRL: " + url);
+                } else {
+                    System.out.println("Certificate is not revoked by CRL: " + url);
+                }
+            } catch (Exception e) {
+                System.err.println("Error verifying CRL: " + e.getMessage());
+            }
+        }
+    }
+
+
+
 }
