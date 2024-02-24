@@ -1,0 +1,2 @@
+http://crl.usertrust.com/USERTrustECCCertificationAuthority.crl
+http://crl.sectigo.com/SectigoECCExtendedValidationSecureServerCA.crl

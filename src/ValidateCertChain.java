@@ -4,6 +4,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.security.*;
 import java.security.cert.*;
 import java.security.interfaces.RSAPublicKey;
@@ -183,19 +185,18 @@ public class ValidateCertChain {
     private static void checkSignatureAndAlgorithm(X509Certificate cert, X509Certificate issuerCert) {
         try {
             String sigAlg = cert.getSigAlgName();
-            if (sigAlg.contains("RSA")){
-                if(verifyRSASignature(cert, issuerCert)){
+            if (sigAlg.contains("RSA")) {
+                if (verifyRSASignature(cert, issuerCert)) {
                     System.out.println("RSA Signature verifies: SUCCESS");
-                }else{
+                } else {
                     System.out.println("RSA Signature verifies: FAILED");
                 }
 
             }
-            if (sigAlg.contains("ECDSA")){
-                if(verifyECDSASignature(cert, issuerCert))
-                {
+            if (sigAlg.contains("ECDSA")) {
+                if (verifyECDSASignature(cert, issuerCert)) {
                     System.out.println("ECDSA Signature verifies: SUCCESS");
-                } else{
+                } else {
                     System.out.println("ECDSA Signature verifies: FAILED");
                 }
             }
@@ -303,7 +304,7 @@ public class ValidateCertChain {
     public static void verifyBasicConstraints(X509Certificate cert) {
         // Get the Basic Constraints extension
         int basicConstraints = cert.getBasicConstraints();
-        if (basicConstraints != -1){
+        if (basicConstraints != -1) {
             System.out.println("This certificate is a CA with basic constraints of : " + basicConstraints);
         } else {
             System.out.println("This certificate is not a CA.");
@@ -328,7 +329,7 @@ public class ValidateCertChain {
         System.out.println("Curve: " + spec);
         // Utilisez les informations de la clé publique et de la spécification de courbe directement
         ECCurve curve = null;
-        if(cert.getSigAlgName().contains("SHA384")) {
+        if (cert.getSigAlgName().contains("SHA384")) {
             curve = new org.bouncycastle.math.ec.custom.sec.SecP384R1Curve(); // Adaptez à la courbe utilisée si nécessaire
         } else if (cert.getSigAlgName().contains("SHA256")) {
             curve = new org.bouncycastle.math.ec.custom.sec.SecP256R1Curve(); // Adaptez à la courbe utilisée si nécessaire
@@ -345,7 +346,7 @@ public class ValidateCertChain {
         // Utiliser l'algorithme approprié pour hasher les données avant vérification
         // Calcul du hash du TBSCertificate
         MessageDigest crypt = null;
-        if(cert.getSigAlgName().contains("SHA384")) {
+        if (cert.getSigAlgName().contains("SHA384")) {
             crypt = MessageDigest.getInstance("SHA-384");
         } else if (cert.getSigAlgName().contains("SHA256")) {
             crypt = MessageDigest.getInstance("SHA-256");
@@ -365,7 +366,7 @@ public class ValidateCertChain {
         ASN1Sequence sequence = (ASN1Sequence) ASN1Sequence.fromByteArray(signature);
         BigInteger r = ((ASN1Integer) sequence.getObjectAt(0)).getValue();
         BigInteger s = ((ASN1Integer) sequence.getObjectAt(1)).getValue();
-        return new BigInteger[] {r, s};
+        return new BigInteger[]{r, s};
     }
 
     private static List<String> getCrlDistributionPoints(X509Certificate cert) throws CertificateParsingException {
@@ -402,56 +403,61 @@ public class ValidateCertChain {
         }
     }
 
-    // Cache pour stocker les CRL et leur date de dernière mise à jour
-    private static Map<String, File> crlCache = new HashMap<>();
+    private static Date getLastModified(String url) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setRequestMethod("HEAD");
+        return new Date(conn.getLastModified());
+    }
+
+    private static String sanitizeUrl(String url) {
+        return url.replaceAll("[:/]", "_");
+    }
 
     private static void verifyCRL(X509Certificate cert, List<String> crlUrls) {
-        for (String url : crlUrls) {
-            try {
-                File crlFile = crlCache.get(url);
-                System.out.println("CRL crlFile: " + crlFile);
-                X509CRL crl = null;
-                if (crlFile != null && crlFile.exists()) {
-                    // Charger la CRL du fichier cache
-                    try (InputStream in = new FileInputStream(crlFile)) {
-
-                        System.out.println("CRL downloaded and cached: ");
-                        CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                        crl = (X509CRL) cf.generateCRL(in);
-                    };
-                    // Vérifier si la CRL est toujours valide
-                    if (crl.getNextUpdate().after(new Date())) {
-                        System.out.println("CRL loaded from cache: " + url);
-                    } else {
-                        crl = null; // La CRL est obsolète
-                    }
-                }
-                if (crl == null) {
-                    // Télécharger la CRL
-                    URL crlUrl = new URL(url);
-                    InputStream crlStream = crlUrl.openStream();
+    for (String url : crlUrls) {
+        try {
+            String sanitizedUrl = sanitizeUrl(url);
+            List<String> cachedUrls = Files.readAllLines(Paths.get("crlCache.txt"));
+            File crlFile = new File("./cache", sanitizedUrl);
+            X509CRL crl = null;
+            if (cachedUrls.contains(url) && crlFile.exists()) {
+                // Charger la CRL du fichier cache
+                try (InputStream in = new FileInputStream(crlFile)) {
                     CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                    crl = (X509CRL) cf.generateCRL(crlStream);
-                    // Mise à jour du cache
-                    crlFile = new File("./cache", url);
-
-                    try (FileOutputStream out = new FileOutputStream(crlFile)) {
-                        out.write(crl.getEncoded());
-                    }
-                    crlCache.put(url, crlFile);
-
-                    System.out.println("CRL downloaded and cached: " + url);
+                    crl = (X509CRL) cf.generateCRL(in);
                 }
-                if (crl.isRevoked(cert)) {
-                    System.out.println("CRL : Certificate is revoked by CRL: " + url);
+                // Vérifier si la CRL est toujours valide
+                if (crl.getNextUpdate().after(new Date())) {
+                    System.out.println("CRL loaded from cache: " + url);
                 } else {
-                    System.out.println("CRL : Certificate is not revoked by CRL: " + url);
+                    crl = null; // La CRL est obsolète
                 }
-            } catch (Exception e) {
-                System.err.println("Error verifying CRL: " + e.getMessage());
             }
+            if (crl == null || getLastModified(url).after(new Date(crlFile.lastModified()))) {
+                // Télécharger la CRL
+                URL crlUrl = new URL(url);
+                InputStream crlStream = crlUrl.openStream();
+                CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                crl = (X509CRL) cf.generateCRL(crlStream);
+                // Mise à jour du cache
+                try (FileOutputStream out = new FileOutputStream(crlFile)) {
+                    out.write(crl.getEncoded());
+                }
+                if (!cachedUrls.contains(url)) {
+                    Files.write(Paths.get("crlCache.txt"), (url + System.lineSeparator()).getBytes(), StandardOpenOption.APPEND);
+                }
+                System.out.println("CRL downloaded and cached: " + url);
+            }
+            if (crl.isRevoked(cert)) {
+                System.out.println("CRL : Certificate is revoked by CRL: " + url);
+            } else {
+                System.out.println("CRL : Certificate is not revoked by CRL: " + url);
+            }
+        } catch (Exception e) {
+            System.err.println("Error verifying CRL: " + e.getMessage());
         }
     }
+}
 
 
     private static void verifyOCSP(X509Certificate cert, X509Certificate issuerCert) throws Exception {
@@ -485,7 +491,7 @@ public class ValidateCertChain {
                 if (con.getResponseCode() == HttpURLConnection.HTTP_OK) {
                     OCSPResp response = new OCSPResp(con.getInputStream());
                     BasicOCSPResp basicResponse = (BasicOCSPResp) response.getResponseObject();
-                    if(basicResponse == null){
+                    if (basicResponse == null) {
                         return;
                     }
                     SingleResp[] responses = basicResponse.getResponses();
