@@ -36,7 +36,6 @@ import org.bouncycastle.operator.DigestCalculatorProvider;
 import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaDigestCalculatorProviderBuilder;
 
-
 public class ValidateCertChain {
     public static void main(String[] args) {
         try {
@@ -403,13 +402,46 @@ public class ValidateCertChain {
         }
     }
 
+    // Cache pour stocker les CRL et leur date de dernière mise à jour
+    private static Map<String, File> crlCache = new HashMap<>();
+
     private static void verifyCRL(X509Certificate cert, List<String> crlUrls) {
         for (String url : crlUrls) {
             try {
-                URL crlUrl = new URL(url);
-                InputStream crlStream = crlUrl.openStream();
-                CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                X509CRL crl = (X509CRL) cf.generateCRL(crlStream);
+                File crlFile = crlCache.get(url);
+                System.out.println("CRL crlFile: " + crlFile);
+                X509CRL crl = null;
+                if (crlFile != null && crlFile.exists()) {
+                    // Charger la CRL du fichier cache
+                    try (InputStream in = new FileInputStream(crlFile)) {
+
+                        System.out.println("CRL downloaded and cached: ");
+                        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                        crl = (X509CRL) cf.generateCRL(in);
+                    };
+                    // Vérifier si la CRL est toujours valide
+                    if (crl.getNextUpdate().after(new Date())) {
+                        System.out.println("CRL loaded from cache: " + url);
+                    } else {
+                        crl = null; // La CRL est obsolète
+                    }
+                }
+                if (crl == null) {
+                    // Télécharger la CRL
+                    URL crlUrl = new URL(url);
+                    InputStream crlStream = crlUrl.openStream();
+                    CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                    crl = (X509CRL) cf.generateCRL(crlStream);
+                    // Mise à jour du cache
+                    crlFile = new File("./cache", url);
+
+                    try (FileOutputStream out = new FileOutputStream(crlFile)) {
+                        out.write(crl.getEncoded());
+                    }
+                    crlCache.put(url, crlFile);
+
+                    System.out.println("CRL downloaded and cached: " + url);
+                }
                 if (crl.isRevoked(cert)) {
                     System.out.println("CRL : Certificate is revoked by CRL: " + url);
                 } else {
