@@ -395,7 +395,7 @@ public class ValidateCertChain {
         try {
             // Extraction de la valeur de l'extension des points de distribution CRL du certificat
             byte[] crlDPExtensionValue = cert.getExtensionValue(cRLDistributionPoints.getId());
-            System.out.println("CRL Distribution Points extension: " + crlDPExtensionValue);
+//            System.out.println("CRL Distribution Points extension: " + Arrays.toString(crlDPExtensionValue));
             if (crlDPExtensionValue == null) {
                 return Collections.emptyList(); // Retourne une liste vide si l'extension n'est pas présente
             }
@@ -441,54 +441,54 @@ public class ValidateCertChain {
     }
 
     private static void verifyCRL(X509Certificate cert, List<String> crlUrls) {
-    for (String url : crlUrls) {
-        try {
-            String sanitizedUrl = sanitizeUrl(url); // Nettoyage de l'URL pour éviter les problèmes de nommage de fichiers
+        for (String url : crlUrls) {
+            try {
+                String sanitizedUrl = sanitizeUrl(url); // Nettoyage de l'URL pour éviter les problèmes de nommage de fichiers
 
-            // Lecture de la liste des URLs en cache
-            List<String> cachedUrls = Files.readAllLines(Paths.get("crlCache.txt"));
-            File crlFile = new File("./cache", sanitizedUrl);
-            X509CRL crl = null;
-            if (cachedUrls.contains(url) && crlFile.exists()) { // Si la CRL est en cache et toujours valide, elle est chargée du fichier
-                try (InputStream in = new FileInputStream(crlFile)) {
+                // Lecture de la liste des URLs en cache
+                List<String> cachedUrls = Files.readAllLines(Paths.get("crlCache.txt"));
+                File crlFile = new File("./cache", sanitizedUrl);
+                X509CRL crl = null;
+                if (cachedUrls.contains(url) && crlFile.exists()) { // Si la CRL est en cache et toujours valide, elle est chargée du fichier
+                    try (InputStream in = new FileInputStream(crlFile)) {
+                        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+                        crl = (X509CRL) cf.generateCRL(in);
+                    }
+                    // Vérifier si la CRL est toujours valide
+                    if (crl.getNextUpdate().after(new Date())) {
+                        System.out.println("CRL loaded from cache");
+                    } else {
+                        crl = null; // La CRL est obsolète et doit être rafraîchie
+                    }
+                }
+                // Si la CRL n'est pas en cache ou est obsolète, elle est téléchargée
+                if (crl == null || getLastModified(url).after(new Date(crlFile.lastModified()))) {
+                    // Télécharger la CRL
+                    URL crlUrl = new URL(url);
+                    InputStream crlStream = crlUrl.openStream();
                     CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                    crl = (X509CRL) cf.generateCRL(in);
+                    crl = (X509CRL) cf.generateCRL(crlStream);
+                    // Mise à jour du cache
+                    try (FileOutputStream out = new FileOutputStream(crlFile)) {
+                        out.write(crl.getEncoded());
+                    }
+                    // Ajout de l'URL au fichier de cache si nécessaire
+                    if (!cachedUrls.contains(url)) {
+                        Files.write(Paths.get("crlCache.txt"), (url + System.lineSeparator()).getBytes(), StandardOpenOption.APPEND);
+                    }
+                    System.out.println("CRL downloaded and cached: " + url);
                 }
-                // Vérifier si la CRL est toujours valide
-                if (crl.getNextUpdate().after(new Date())) {
-                    System.out.println("CRL loaded from cache: " + url);
+                // Vérification si le certificat est révoqué par la CRL
+                if (crl.isRevoked(cert)) {
+                    System.out.println("CRL : Certificate is revoked by CRL");
                 } else {
-                    crl = null; // La CRL est obsolète et doit être rafraîchie
+                    System.out.println("CRL : Certificate is not revoked by CRL");
                 }
+            } catch (Exception e) {
+                System.err.println("Error verifying CRL: " + e.getMessage());
             }
-            // Si la CRL n'est pas en cache ou est obsolète, elle est téléchargée
-            if (crl == null || getLastModified(url).after(new Date(crlFile.lastModified()))) {
-                // Télécharger la CRL
-                URL crlUrl = new URL(url);
-                InputStream crlStream = crlUrl.openStream();
-                CertificateFactory cf = CertificateFactory.getInstance("X.509");
-                crl = (X509CRL) cf.generateCRL(crlStream);
-                // Mise à jour du cache
-                try (FileOutputStream out = new FileOutputStream(crlFile)) {
-                    out.write(crl.getEncoded());
-                }
-                // Ajout de l'URL au fichier de cache si nécessaire
-                if (!cachedUrls.contains(url)) {
-                    Files.write(Paths.get("crlCache.txt"), (url + System.lineSeparator()).getBytes(), StandardOpenOption.APPEND);
-                }
-                System.out.println("CRL downloaded and cached: " + url);
-            }
-            // Vérification si le certificat est révoqué par la CRL
-            if (crl.isRevoked(cert)) {
-                System.out.println("CRL : Certificate is revoked by CRL: " + url);
-            } else {
-                System.out.println("CRL : Certificate is not revoked by CRL: " + url);
-            }
-        } catch (Exception e) {
-            System.err.println("Error verifying CRL: " + e.getMessage());
         }
     }
-}
 
 
     private static void verifyOCSP(X509Certificate cert, X509Certificate issuerCert) throws Exception {

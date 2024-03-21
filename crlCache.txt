@@ -1,2 +1,3 @@
 http://crl.usertrust.com/USERTrustECCCertificationAuthority.crl
 http://crl.sectigo.com/SectigoECCExtendedValidationSecureServerCA.crl
+http://x1.c.lencr.org/
